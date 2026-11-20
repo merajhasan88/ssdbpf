@@ -1,0 +1,4 @@
+[target.riscv64gc-unknown-linux-gnu]
+linker = "riscv64-linux-gnu-gcc"
+rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static"]
+runner = "qemu-riscv64"
