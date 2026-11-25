@@ -4,6 +4,9 @@
 /// A register number, x0..x31.
 pub type Reg = u8;
 
+/// An immediate
+pub type Imm = i32;
+
 /// Register x0 (ABI name `zero`).
 pub const ZERO: Reg = 0;
 /// Register x1 (ABI name `ra`)
@@ -12,6 +15,10 @@ pub const RA: Reg = 1;
 pub const A0: Reg = 10;
 /// Register x11 (ABI name `a1`)
 pub const A1: Reg = 11;
+/// Register x12 (ABI name `a2`)
+pub const A2: Reg = 12;
+/// Register x13 (ABI name `a3`)
+pub const A3: Reg = 13;
 /// Register x15 (ABI name `a5`)
 pub const A5: Reg = 15;
 
@@ -40,6 +47,15 @@ fn check_register(r: Reg) -> Result<u32, EncodeError> {
         Ok(value)
     } else {
         Err(EncodeError::BadRegister(r))
+    }
+}
+
+/// Checks Immediate range and sends back lowest 12 bits
+fn check_immediate(i: Imm) -> Result<u32, EncodeError> {
+    if (-2048..=2047).contains(&i) {
+        Ok((i as u32) & 0xFFF)
+    } else {
+        Err(EncodeError::ImmediateOutOfRange(i64::from(i)))
     }
 }
 
@@ -83,8 +99,17 @@ fn r_type(
 }
 
 /// I-type: imm[11:0] | rs1 | funct3 | rd | opcode
-fn i_type(opcode: u32, rd: Reg, funct3: u32, rs1: Reg, imm: i32) -> Result<u32, EncodeError> {
-    todo!()
+fn i_type(opcode: u32, rd: Reg, funct3: u32, rs1: Reg, imm: Imm) -> Result<u32, EncodeError> {
+    let unshifted_imm = check_immediate(imm)?;
+    let unshifted_rs1 = check_register(rs1)?;
+    let unshifted_funct3 = check_field(funct3, FieldName::Funct3)?;
+    let unshifted_rd = check_register(rd)?;
+    let sizevalidated_opcode = check_field(opcode, FieldName::Opcode)?;
+    Ok(unshifted_imm << 20
+        | unshifted_rs1 << 15
+        | unshifted_funct3 << 12
+        | unshifted_rd << 7
+        | sizevalidated_opcode)
 }
 
 // ---- Instructions (opcode/funct3/funct7 values: the manual's instruction listing) ----
@@ -93,23 +118,23 @@ pub fn add(rd: Reg, rs1: Reg, rs2: Reg) -> Result<u32, EncodeError> {
     r_type(0b011_0011, rd, 0b000, rs1, rs2, 0b000_0000)
 }
 
-pub fn addi(rd: Reg, rs1: Reg, imm: i32) -> Result<u32, EncodeError> {
-    todo!()
+pub fn addi(rd: Reg, rs1: Reg, imm: Imm) -> Result<u32, EncodeError> {
+    i_type(0b001_0011, rd, 0b000, rs1, imm)
 }
 
-pub fn jalr(rd: Reg, rs1: Reg, imm: i32) -> Result<u32, EncodeError> {
-    todo!()
+pub fn jalr(rd: Reg, rs1: Reg, imm: Imm) -> Result<u32, EncodeError> {
+    i_type(0b110_0111, rd, 0b000, rs1, imm)
 }
 
 // ---- Pseudo-instructions (asm manual): `mv rd, rs` = `addi rd, rs, 0`; `ret` = `jalr x0, 0(x1)` ----
 
 pub fn mv(rd: Reg, rs: Reg) -> Result<u32, EncodeError> {
-    todo!()
+    addi(rd, rs, 0)
 }
 
-/// Can `ret` ever fail? Decide, and pick the return type to match.
+/// If jalr or i_type ever gets a bug, ret() reports an error instead of quietly returning a wrong word
 pub fn ret() -> Result<u32, EncodeError> {
-    todo!()
+    jalr(ZERO, RA, 0)
 }
 
 #[cfg(test)]
@@ -123,6 +148,19 @@ mod tests {
     fn test_register_size() {
         assert_eq!(check_register(31), Ok(31));
         assert_eq!(check_register(32), Err(EncodeError::BadRegister(32)));
+    }
+    #[test]
+    fn test_immediate_size() {
+        assert_eq!(check_immediate(2047), Ok(2047));
+        assert_eq!(check_immediate(-2048), Ok(((-2048_i32) as u32) & 0xFFF));
+        assert_eq!(
+            check_immediate(-2049),
+            Err(EncodeError::ImmediateOutOfRange(-2049))
+        );
+        assert_eq!(
+            check_immediate(2048),
+            Err(EncodeError::ImmediateOutOfRange(2048))
+        );
     }
     #[test]
     fn field_validation() {
@@ -151,7 +189,78 @@ mod tests {
         // llvm-mc: [0xb3,0x87,0xb7,0x00]  ->  0x00b7_87b3   (a5 = x15, a1 = x11)
         assert_eq!(add(A5, A5, A1), Ok(0x00b7_87b3));
     }
+    #[test]
+    fn addi_a5_a5_minus1() {
+        assert_eq!(
+            addi(A5, A5, -1),
+            Ok(0b1111_1111_1111_0111_1000_0111_1001_0011)
+        );
+    }
+    #[test]
+    fn mv_a3_a2() {
+        assert_eq!(mv(A3, A2), Ok(0b0000_0000_0000_0110_0000_0110_1001_0011));
+    }
+    #[test]
+    fn mv_a5_a0() {
+        assert_eq!(mv(A5, A0), Ok(0b0000_0000_0000_0101_0000_0111_1001_0011));
+    }
+    #[test]
+    fn mv_a0_a5() {
+        assert_eq!(mv(A0, A5), Ok(0b0000_0000_0000_0111_1000_0101_0001_0011));
+    }
+    #[test]
+    fn test_ret() {
+        assert_eq!(ret(), Ok(0x0000_8067));
+    }
+    #[test]
+    fn addi_a0_a0_2047() {
+        assert_eq!(addi(A0, A0, 2047), Ok(0x7ff50513));
+    }
+    #[test]
+    fn addi_a0_a0_minus2048() {
+        assert_eq!(addi(A0, A0, -2048), Ok(0x80050513));
+    }
+    #[test]
+    fn addi_immediate_2048() {
+        assert_eq!(
+            addi(A0, A0, 2048),
+            Err(EncodeError::ImmediateOutOfRange(2048))
+        );
+    }
+    #[test]
+    fn addi_immediate_minus2049() {
+        assert_eq!(
+            addi(A0, A0, -2049),
+            Err(EncodeError::ImmediateOutOfRange(-2049))
+        );
+    }
+    #[test]
+    fn addi_register_test_rd() {
+        assert_eq!(addi(32, A0, 0), Err(EncodeError::BadRegister(32)));
+    }
+    #[test]
+    fn add_register_test_rd() {
+        assert_eq!(add(32, A0, A1), Err(EncodeError::BadRegister(32)));
+    }
+    #[test]
+    fn jalr_register_test_rd() {
+        assert_eq!(jalr(32, A0, 10), Err(EncodeError::BadRegister(32)));
+    }
 
-    // TODO: mv a5, a0   |   mv a0, a5   |   ret   |   addi a5, a5, -1
-    // TODO: error cases: a register number above 31, and immediates just outside the 12-bit signed range
+    #[test]
+    fn addi_register_test_rs1() {
+        assert_eq!(addi(A0, 32, 0), Err(EncodeError::BadRegister(32)));
+    }
+    #[test]
+    fn add_register_test_rs1() {
+        assert_eq!(add(A0, 32, A1), Err(EncodeError::BadRegister(32)));
+    }
+    #[test]
+    fn add_register_test_rs2() {
+        assert_eq!(add(A0, A1, 32), Err(EncodeError::BadRegister(32)));
+    }
+    #[test]
+    fn jalr_register_test_rs1() {
+        assert_eq!(jalr(A0, 32, 10), Err(EncodeError::BadRegister(32)));
+    }
 }
